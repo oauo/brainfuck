@@ -1,4 +1,3 @@
-
 let orders = ',.[]<>+-'.split('');
 let regex = {
   clean: new RegExp('[^' + escapeRegExp(orders.join('')) + ']', 'g'),
@@ -11,7 +10,8 @@ let regex = {
 let config = {
   memorySize: 30000,
   bits: 8, // 8, 16, 32
-  maxInstructions: 0 // limit execution to number of instructions, omit if 0
+  maxInstructions: 0, // limit execution to number of instructions, omit if 0
+  allowSpecialChars: false, //Allow the use of special character codes for decimal, hex, octal, and binary
 };
 
 function getInstruction(count, orderLess, orderMore) {
@@ -43,7 +43,7 @@ module.exports.config = (userConfig) => {
 
 module.exports.compile = (bfSource, userConfig) => {
   let actualConfig = extendObj(cloneObj(config), userConfig);
-  let cleanedSource = (bfSource+'').replace(regex.clean, '');
+  let cleanedSource = (bfSource + '').replace(regex.clean, '');
   let optimized = cleanedSource
     // optimze cell manipulating instructions
     // for example: '+++--' => '+'
@@ -63,16 +63,16 @@ module.exports.compile = (bfSource, userConfig) => {
     })
     // add (z)ero instruction => it makes reseting cell much faster
     .replace(regex.zero, 'z');
-  
+
   let ordersMap = { // m,p,o,i,l
     ',': () => 'm[p]=i();',
     '.': () => 'o(m[p]);',
     '[': () => 'while(m[p]){',
     ']': () => '}',
-    '<': (count) => 'p-='+count+';while(p<0)p+=l;',
-    '>': (count) => 'p+='+count+';while(p>=l)p-=l;',
-    '+': (count) => 'm[p]+='+count+';',
-    '-': (count) => 'm[p]-='+count+';',
+    '<': (count) => 'p-=' + count + ';while(p<0)p+=l;',
+    '>': (count) => 'p+=' + count + ';while(p>=l)p-=l;',
+    '+': (count) => 'm[p]+=' + count + ';',
+    '-': (count) => 'm[p]-=' + count + ';',
     // optimizations:
     'z': () => 'm[p]=0;' // [-] => quick reset memory cell
   };
@@ -85,12 +85,12 @@ module.exports.compile = (bfSource, userConfig) => {
 
   let definitions = {
     // count
-    c: (config) => config.maxInstructions > 0 ? 'let c='+config.maxInstructions+';' : '',
+    c: (config) => config.maxInstructions > 0 ? 'let c=' + config.maxInstructions + ';' : '',
     // length
     l: (config) => ['let l=', config.memorySize, ';'].join(''),
     // memory
     m: (config) => {
-      const constr = {'8': 'Uint8Array', '16': 'Uint16Array', '32': 'Uint32Array'};
+      const constr = { '8': 'Uint8Array', '16': 'Uint16Array', '32': 'Uint32Array' };
       return ['let m=new ', constr[config.bits] || constr[8], '(l);'].join('');
     },
     // pointer
@@ -100,6 +100,33 @@ module.exports.compile = (bfSource, userConfig) => {
     // in
     i: () => 'let i=input||(()=>0);'
   };
+
+  let bases = [
+    {
+      match: /^((x[\da-fA-F]*)|(u[\da-fA-F]{4}))/,
+      parse: /[\da-fA-F]*$/,
+      base: 16,
+      // \x7e == \x7E == \u007e == 126
+    },
+    {
+      match: /^o[0-7]*/,
+      parse: /[0-7]*$/,
+      base: 8,
+      // \o176 == 126
+    },
+    {
+      match: /^b[01]*/,
+      parse: /[01]*$/,
+      base: 2,
+      // \b1111110 == 126
+    },
+    {
+      match: /^\d*/,
+      parse: /\d*$/,
+      base: 10,
+      // \126 == 126
+    },
+  ]
 
   // create variables definitions
   let code = Object.keys(definitions).map(key => definitions[key](actualConfig));
@@ -112,7 +139,7 @@ module.exports.compile = (bfSource, userConfig) => {
   });
 
   let compiled = new Function(['input', 'output'], code.join(''));
-  
+
   return {
     run: (input, output) => {
       let inp, out;
@@ -121,7 +148,19 @@ module.exports.compile = (bfSource, userConfig) => {
         input = input.split('');
         inp = () => {
           let ch = input.shift();
-          return ch ? ch.charCodeAt(0) : 0;
+          if (actualConfig.allowSpecialChars && ch === `\\`) {
+            const joined_input = input.join('');
+            const res =
+              bases.find(({ match }) => match.test(joined_input))
+            if (!res) return `\\`.charCodeAt(0);
+
+            const match = joined_input.match(res.match)[0];
+            const value = parseInt(match.match(res.parse)[0], res.base);
+
+            input.splice(0, match.length);
+
+            return value;
+          } else return ch ? ch.charCodeAt(0) : 0;
         };
       } else if (typeof input === 'function') {
         inp = input;
